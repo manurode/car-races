@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Car Races - Prototipo Top-Down</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #111; }
+        canvas { display: block; }
+
+        #hud {
+            position: absolute;
+            top: 16px;
+            left: 16px;
+            color: #fff;
+            font-family: monospace;
+            font-size: 14px;
+            background: rgba(0,0,0,0.5);
+            padding: 8px 14px;
+            border-radius: 6px;
+            pointer-events: none;
+            line-height: 1.6;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="hud">
+        <span id="speed">0</span> km/h &nbsp;|&nbsp;
+        ⬆⬇⬅➡ / WASD
+    </div>
+
+    <!-- ==================== Three.js desde CDN ==================== -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // ──────────────────────────────────────────────
+        // CONFIGURACIÓN DEL JUEGO (ajusta estos valores a tu gusto)
+        // ──────────────────────────────────────────────
+        const CFG = {
+            acceleration: 12,   // m/s²  – cuánto acelera al pulsar adelante
+            reverseAccel: 8,   // m/s²  – aceleración en marcha atrás
+            friction: 5,        // m/s²  – desaceleración al soltar teclas
+            maxSpeed: 30,       // m/s   – velocidad máxima hacia adelante
+            maxReverse: 12,     // m/s   – velocidad máxima marcha atrás
+            turnSpeed: 3.0,     // rad/s – velocidad de giro a máxima velocidad
+            minTurnFactor: 0.2, // factor mínimo de giro al iniciar el movimiento
+            cameraHeight: 20,
+            cameraDistance: 8,
+            cameraLerp: 4.0,    // suavizado de la cámara (más = más rápido)
+            groundSize: 100,
+            gridDivisions: 100,
+        };
+
+        // ──────────────────────────────────────────────
+        // ESCENA, CÁMARA, RENDERER
+        // ──────────────────────────────────────────────
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a2e);
+        scene.fog = new THREE.Fog(0x1a1a2e, 60, 150);
+
+        const camera = new THREE.PerspectiveCamera(
+            50,                                    // FOV
+            window.innerWidth / window.innerHeight, // Aspect
+            0.5,                                   // Near
+            200                                    // Far
+        );
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        document.body.appendChild(renderer.domElement);
+
+        // ──────────────────────────────────────────────
+        // ILUMINACIÓN
+        // ──────────────────────────────────────────────
+        const ambient = new THREE.AmbientLight(0x404060, 1.5);
+        scene.add(ambient);
+
+        const sun = new THREE.DirectionalLight(0xfff5e6, 6);
+        sun.position.set(30, 40, 20);
+        sun.castShadow = true;
+        sun.shadow.mapSize.set(1024, 1024);
+        sun.shadow.camera.near = 0.5;
+        sun.shadow.camera.far = 100;
+        sun.shadow.camera.left = -50;
+        sun.shadow.camera.right = 50;
+        sun.shadow.camera.top = 50;
+        sun.shadow.camera.bottom = -50;
+        sun.shadow.bias = -0.0001;
+        scene.add(sun);
+
+        // ──────────────────────────────────────────────
+        // SUELO (Grid helper para ver el movimiento)
+        // ──────────────────────────────────────────────
+        const groundGeo = new THREE.PlaneGeometry(CFG.groundSize, CFG.groundSize);
+        const groundMat = new THREE.MeshStandardMaterial({
+            color: 0x2a2a3a,
+            roughness: 0.9,
+            metalness: 0.1,
+        });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // Rejilla pintada sobre el suelo
+        const grid = new THREE.GridHelper(
+            CFG.groundSize,
+            CFG.gridDivisions,
+            0x555570,
+            0x3a3a4a
+        );
+        grid.position.y = 0.01;
+        scene.add(grid);
+
+        // Bordes del circuito como referencia
+        const edgeGeo = new THREE.EdgesGeometry(groundGeo);
+        const edgeLine = new THREE.LineSegments(
+            edgeGeo,
+            new THREE.LineBasicMaterial({ color: 0x8888aa })
+        );
+        edgeLine.rotation.x = -Math.PI / 2;
+        edgeLine.position.y = 0.02;
+        scene.add(edgeLine);
+
+        // ──────────────────────────────────────────────
+        // COCHE (BoxGeometry fácil de sustituir por GLTF)
+        // ──────────────────────────────────────────────
+        const carGroup = new THREE.Group(); // ← grupo contenedor (al cargar un GLTF lo añades aquí)
+
+        const bodyGeo = new THREE.BoxGeometry(1.8, 0.5, 3.5);
+        const bodyMat = new THREE.MeshStandardMaterial({
+            color: 0xff3333,
+            roughness: 0.3,
+            metalness: 0.6,
+        });
+        const body = new THREE.Mesh(bodyGeo, bodyMat);
+        body.position.y = 0.55;
+        body.castShadow = true;
+        body.receiveShadow = true;
+        carGroup.add(body);
+
+        // Techo / cabina
+        const cabinGeo = new THREE.BoxGeometry(1.2, 0.35, 1.6);
+        const cabinMat = new THREE.MeshStandardMaterial({
+            color: 0x222244,
+            roughness: 0.2,
+            metalness: 0.3,
+        });
+        const cabin = new THREE.Mesh(cabinGeo, cabinMat);
+        cabin.position.set(0, 0.9, -0.3);
+        cabin.castShadow = true;
+        carGroup.add(cabin);
+
+        // "Faros" delanteros
+        const lightGeo = new THREE.BoxGeometry(0.3, 0.12, 0.15);
+        const lightMat = new THREE.MeshStandardMaterial({
+            color: 0xffffcc,
+            roughness: 0.1,
+            emissive: 0xffffaa,
+            emissiveIntensity: 0.6,
+        });
+        const headL = new THREE.Mesh(lightGeo, lightMat);
+        headL.position.set(0.45, 0.58, 1.78);
+        carGroup.add(headL);
+        const headR = new THREE.Mesh(lightGeo, lightMat);
+        headR.position.set(-0.45, 0.58, 1.78);
+        carGroup.add(headR);
+
+        // "Pilotos" traseros
+        const tailGeo = new THREE.BoxGeometry(0.3, 0.12, 0.15);
+        const tailMat = new THREE.MeshStandardMaterial({
+            color: 0xff4444,
+            roughness: 0.1,
+            emissive: 0xff0000,
+            emissiveIntensity: 0.6,
+        });
+        const tailL = new THREE.Mesh(tailGeo, tailMat);
+        tailL.position.set(0.45, 0.58, -1.78);
+        carGroup.add(tailL);
+        const tailR = new THREE.Mesh(tailGeo, tailMat);
+        tailR.position.set(-0.45, 0.58, -1.78);
+        carGroup.add(tailR);
+
+        // Ruedas
+        function createWheel(x, z) {
+            const wGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.35, 12);
+            wGeo.rotateX(Math.PI / 2);
+            const wMat = new THREE.MeshStandardMaterial({
+                color: 0x111111,
+                roughness: 0.8,
+            });
+            const wheel = new THREE.Mesh(wGeo, wMat);
+            wheel.position.set(x, 0.4, z);
+            wheel.castShadow = true;
+            return wheel;
+        }
+        carGroup.add(createWheel(0.85, 1.1));
+        carGroup.add(createWheel(-0.85, 1.1));
+        carGroup.add(createWheel(0.85, -1.1));
+        carGroup.add(createWheel(-0.85, -1.1));
+
+        // Posición inicial del coche
+        carGroup.position.set(0, 0, 0);
+        scene.add(carGroup);
+
+        // ──────────────────────────────────────────────
+        // ESTADO DEL MOVIMIENTO (físicas arcade)
+        // ──────────────────────────────────────────────
+        const input = { forward: 0, turn: 0 };  // -1..1
+        let speed = 0;           // velocidad lineal actual (positivo=adelante, negativo=atrás)
+        let angle = 0;           // rotación en radianes (eje Y)
+
+        // ──────────────────────────────────────────────
+        // INPUT: WASD + Flechas
+        // ──────────────────────────────────────────────
+        function updateInput() {
+            input.forward = 0;
+            input.turn = 0;
+            if (keys.has('KeyW') || keys.has('ArrowUp'))    input.forward += 1;
+            if (keys.has('KeyS') || keys.has('ArrowDown'))  input.forward -= 1;
+            if (keys.has('KeyA') || keys.has('ArrowLeft'))  input.turn += 1;
+            if (keys.has('KeyD') || keys.has('ArrowRight')) input.turn -= 1;
+        }
+
+        const keys = new Set();
+        window.addEventListener('keydown', e => {
+            keys.add(e.code);
+            e.preventDefault();
+        });
+        window.addEventListener('keyup', e => {
+            keys.delete(e.code);
+            e.preventDefault();
+        });
+
+        // ──────────────────────────────────────────────
+        // RELOJ
+        // ──────────────────────────────────────────────
+        const clock = new THREE.Clock();
+
+        // ──────────────────────────────────────────────
+        // BUCLE PRINCIPAL
+        // ──────────────────────────────────────────────
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const dt = Math.min(clock.getDelta(), 0.1); // segundos, capped para evitar saltos
+
+            updateInput();
+
+            // ────────── FÍSICAS ARCADE ──────────
+
+            // 1. Aceleración / freno / fricción
+            if (input.forward !== 0) {
+                // El jugador está acelerando (adelante o atrás)
+                const accel = input.forward > 0 ? CFG.acceleration : CFG.reverseAccel;
+                speed += accel * Math.sign(input.forward) * dt;
+
+                // Clampear a máximos
+                if (input.forward > 0) {
+                    speed = Math.min(speed, CFG.maxSpeed);
+                } else {
+                    speed = Math.max(speed, -CFG.maxReverse);
+                }
+            } else {
+                // Sin input: aplicar fricción hasta detenerse
+                if (Math.abs(speed) < CFG.friction * dt) {
+                    speed = 0; // umbral de parada total
+                } else {
+                    speed -= Math.sign(speed) * CFG.friction * dt;
+                }
+            }
+
+            // 2. Rotación: SOLO si el coche está en movimiento
+            const absSpeed = Math.abs(speed);
+            const moving = absSpeed > 0.01;
+
+            if (moving && input.turn !== 0) {
+                // El factor de giro escala con la velocidad: a más velocidad, mayor giro
+                const speedNorm = Math.min(absSpeed / CFG.maxSpeed, 1.0);
+                const turnFactor = CFG.minTurnFactor + (1.0 - CFG.minTurnFactor) * speedNorm;
+                const turnAmount = CFG.turnSpeed * turnFactor * Math.sign(input.turn) * dt;
+
+                // Invertir dirección de giro en marcha atrás
+                if (speed < 0) {
+                    angle -= turnAmount;
+                } else {
+                    angle += turnAmount;
+                }
+            }
+
+            // 3. Aplicar velocidad al coche
+            const vx = Math.sin(angle) * speed * dt;
+            const vz = Math.cos(angle) * speed * dt;
+            carGroup.position.x += vx;
+            carGroup.position.z += vz;
+            carGroup.rotation.y = angle;
+
+            // ────────── CÁMARA: sigue al coche con suavizado ──────────
+            const targetCamX = carGroup.position.x;
+            const targetCamZ = carGroup.position.z + CFG.cameraDistance;
+            const targetCamY = carGroup.position.y + CFG.cameraHeight;
+
+            camera.position.x += (targetCamX - camera.position.x) * CFG.cameraLerp * dt;
+            camera.position.y += (targetCamY - camera.position.y) * CFG.cameraLerp * dt;
+            camera.position.z += (targetCamZ - camera.position.z) * CFG.cameraLerp * dt;
+
+            // La cámara mira un poco por delante del coche en la dirección de movimiento
+            const lookTarget = new THREE.Vector3(
+                carGroup.position.x,
+                carGroup.position.y + 0.5,
+                carGroup.position.z
+            );
+            camera.lookAt(lookTarget);
+
+            // ────────── HUD ──────────
+            document.getElementById('speed').textContent = Math.round(Math.abs(speed) * 3.6); // m/s → km/h
+
+            // ────────── RENDER ──────────
+            renderer.render(scene, camera);
+        }
+
+        // ──────────────────────────────────────────────
+        // RESIZE RESPONSIVO
+        // ──────────────────────────────────────────────
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // ──────────────────────────────────────────────
+        // ARRANQUE
+        // ──────────────────────────────────────────────
+        animate();
+        console.log('🏎️  Car Races prototipo listo.');
+        console.log('   Ajusta aceleración/fricción en el objeto CFG al inicio del script.');
+        console.log('   Sustituye carGroup.children por un modelo GLTF cuando quieras.');
+    </script>
+</body>
+</html>
